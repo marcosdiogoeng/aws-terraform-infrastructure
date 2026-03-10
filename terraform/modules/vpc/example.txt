@@ -1,0 +1,61 @@
+module "vpc" {
+  source = "../../modules/vpc copy"
+
+  name     = "VPC-Ambiente-web-hml"
+  vpc_cidr = "10.128.4.0/22"
+
+  tags = {
+    env = "uat"
+    product  = "web-uat"
+  }
+  
+  create_igw = true
+
+  public_subnets = [
+    { name = "Subnet-public-web-hml-1a", cidr = "10.128.4.0/25", az = "sa-east-1a" },
+    { name = "Subnet-public-web-hml-1b", cidr = "10.128.5.0/25", az = "sa-east-1b" },
+    { name = "Subnet-public-web-hml-1c", cidr = "10.128.6.0/25", az = "sa-east-1c" },
+  ]
+
+  private_subnets = [
+    { name = "Subnet-private-web-hml-1a", cidr = "10.128.4.128/25", az = "sa-east-1a" },
+    { name = "Subnet-private-web-hml-1b", cidr = "10.128.5.128/25", az = "sa-east-1b" },
+    { name = "Subnet-private-web-hml-1c", cidr = "10.128.6.128/25", az = "sa-east-1c" },
+  ]
+
+  # ── NAT Gateway ───────────────────────────────────────────────────────────────
+
+  # Modo HA: um NAT por AZ (produção) ✅
+  # create_nat_gateway = true
+  # nat_gateway_ha     = true
+  # → cria 3 NAT GWs (1a, 1b, 1c) e cada subnet privada rota 0.0.0.0/0
+  #   automaticamente para o NAT da mesma AZ.
+
+  # Modo single: apenas um NAT (dev/staging) — descomente para usar
+   create_nat_gateway = true
+   nat_gateway_ha     = false
+
+  # ── Rotas extras — RT pública ─────────────────────────────────────────────────
+#   public_extra_routes = [
+#     {
+#       destination_cidr_block = "192.168.0.0/16"
+#       transit_gateway_id     = "tgw-0abc123456789"
+#     },
+#   ]
+
+  # ── Rotas extras — RTs privadas ───────────────────────────────────────────────
+  # 0.0.0.0/0 → NAT já é adicionada automaticamente; use aqui apenas rotas extras.
+#   private_extra_routes = [
+#     {
+#       subnet_name            = "priv-1a"
+#       destination_cidr_block = "172.16.0.0/12"
+#       transit_gateway_id     = "tgw-0abc123456789"
+#     },
+#     {
+#       subnet_name            = "priv-1b"
+#       destination_cidr_block = "172.16.0.0/12"
+#       transit_gateway_id     = "tgw-0abc123456789"
+#     },
+#   ]
+}
+

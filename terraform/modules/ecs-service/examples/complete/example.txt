@@ -1,0 +1,376 @@
+# ==============================================================================
+# Exemplo: API + Frontend + Worker
+# Um único ALB compartilhado com roteamento por path e host
+# ==============================================================================
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+# ── 1. CLUSTER ────────────────────────────────────────────────────────────────
+module "cluster" {
+  source = "../../terraform-aws-ecs-cluster"
+
+  name               = "producao"
+  container_insights = true
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  default_capacity_provider_strategy = [
+    { capacity_provider = "FARGATE",      weight = 1, base = 1 },
+    { capacity_provider = "FARGATE_SPOT", weight = 4, base = 0 },
+  ]
+
+  create_kms_key        = true
+  create_exec_log_group = true
+
+  tags = local.common_tags
+}
+
+# ── 2. ALB COMPARTILHADO ──────────────────────────────────────────────────────
+module "alb" {
+  source = "../../terraform-aws-alb"
+
+  name            = "producao-alb"
+  vpc_id          = var.vpc_id
+  subnets         = var.public_subnets
+  security_groups = [aws_security_group.alb.id]
+  internal        = false
+
+  # TLS
+  https_certificate_arn  = var.certificate_arn
+  extra_certificate_arns = var.extra_certificate_arns # domínios adicionais (SNI)
+  http_to_https_redirect = true
+
+  deletion_protection = true
+  drop_invalid_header_fields = true
+
+  # Access logs no S3 (opcional)
+  # access_logs = { bucket = "meu-bucket-logs", prefix = "alb/producao" }
+
+  # Um target group por serviço
+  target_groups = {
+    api = {
+      port     = 8080
+      protocol = "HTTP"
+      health_check = {
+        path                = "/health"
+        matcher             = "200"
+        healthy_threshold   = 2
+        unhealthy_threshold = 3
+        interval            = 15
+      }
+      deregistration_delay = 30
+    }
+
+    frontend = {
+      port     = 80
+      protocol = "HTTP"
+      health_check = {
+        path    = "/"
+        matcher = "200-299"
+      }
+      stickiness = {
+        enabled = true
+        cookie_duration = 3600
+      }
+    }
+
+    # O worker não precisa de target group (sem tráfego HTTP de entrada)
+  }
+
+  # Default action → frontend (rota "/")
+  default_target_group = "frontend"
+
+  # Regras de roteamento
+  listener_rules = {
+    # Tráfego de API por path prefix
+    api_path = {
+      priority     = 100
+      target_group = "api"
+      path_patterns = ["/api/*", "/v1/*", "/v2/*"]
+    }
+
+    # Ou por hostname específico da API
+    api_host = {
+      priority     = 110
+      target_group = "api"
+      host_headers = ["api.minha-empresa.com"]
+    }
+
+    # Frontend por host
+    frontend_host = {
+      priority     = 200
+      target_group = "frontend"
+      host_headers = ["app.minha-empresa.com", "www.minha-empresa.com"]
+    }
+  }
+
+  tags = local.common_tags
+}
+
+# ── 3a. SERVIÇO: API ──────────────────────────────────────────────────────────
+module "service_api" {
+  source = "../../terraform-aws-ecs-service"
+
+  name         = "api"
+  cluster_arn  = module.cluster.cluster_arn
+  cluster_name = module.cluster.cluster_name
+
+  # Task
+  task_cpu    = "1024"
+  task_memory = "2048"
+
+  # Containers
+  container_definitions = [
+    {
+      name  = "api"
+      image = "${var.ecr_registry}/api:${var.api_image_tag}"
+      port_mappings = [{ container_port = 8080 }]
+      environment = {
+        PORT      = "8080"
+        NODE_ENV  = "production"
+        LOG_LEVEL = "info"
+      }
+      secrets = [
+        { name = "DATABASE_URL", value_from = "/prod/api/database-url" },
+        { name = "JWT_SECRET",   value_from = "/prod/api/jwt-secret" },
+      ]
+      health_check = {
+        command     = ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
+      cpu    = 768
+      memory = 1536
+    },
+    # Sidecar: Datadog
+    {
+      name      = "datadog-agent"
+      image     = "public.ecr.aws/datadog/agent:7"
+      essential = false
+      cpu       = 256
+      memory    = 512
+      environment = {
+        DD_APM_ENABLED = "true"
+        DD_SITE        = "datadoghq.com"
+      }
+      secrets = [
+        { name = "DD_API_KEY", value_from = "/prod/datadog/api-key" },
+      ]
+    }
+  ]
+
+  # Permissões extras para a task role
+  task_role_policy_arns = [
+    "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+  ]
+
+  # Rede
+  subnets         = var.private_subnets
+  security_groups = [aws_security_group.ecs_tasks.id]
+
+  # Registra no target group "api" do ALB compartilhado
+  target_group_arn             = module.alb.target_group_arns["api"]
+  load_balancer_container_name = "api"
+  load_balancer_container_port = 8080
+  health_check_grace_period_seconds = 90
+
+  # Autoscaling
+  autoscaling_enabled        = true
+  autoscaling_min_capacity   = 2
+  autoscaling_max_capacity   = 20
+  autoscaling_cpu_target     = 65
+  autoscaling_memory_target  = 75
+  autoscaling_alb_requests_target = 500
+
+  # Passando sufixos para o autoscaling por request count
+  alb_arn_suffix          = module.alb.alb_arn_suffix
+  target_group_arn_suffix = module.alb.target_group_arn_suffixes["api"]
+
+  desired_count          = 3
+  enable_execute_command = true
+
+  tags = local.common_tags
+}
+
+# ── 3b. SERVIÇO: Frontend ─────────────────────────────────────────────────────
+module "service_frontend" {
+  source = "../../terraform-aws-ecs-service"
+
+  name         = "frontend"
+  cluster_arn  = module.cluster.cluster_arn
+  cluster_name = module.cluster.cluster_name
+
+  task_cpu    = "512"
+  task_memory = "1024"
+
+  container_definitions = [
+    {
+      name  = "nginx"
+      image = "${var.ecr_registry}/frontend:${var.frontend_image_tag}"
+      port_mappings = [{ container_port = 80 }]
+      environment = {
+        API_URL = "https://api.minha-empresa.com"
+      }
+    }
+  ]
+
+  subnets         = var.private_subnets
+  security_groups = [aws_security_group.ecs_tasks.id]
+
+  target_group_arn             = module.alb.target_group_arns["frontend"]
+  load_balancer_container_name = "nginx"
+  load_balancer_container_port = 80
+
+  autoscaling_enabled      = true
+  autoscaling_min_capacity = 2
+  autoscaling_max_capacity = 10
+  autoscaling_cpu_target   = 70
+
+  desired_count = 2
+  tags          = local.common_tags
+}
+
+# ── 3c. SERVIÇO: Worker (sem ALB) ─────────────────────────────────────────────
+module "service_worker" {
+  source = "../../terraform-aws-ecs-service"
+
+  name         = "worker"
+  cluster_arn  = module.cluster.cluster_arn
+  cluster_name = module.cluster.cluster_name
+
+  task_cpu    = "512"
+  task_memory = "1024"
+
+  # Usar FARGATE_SPOT no worker para economizar ~70%
+  capacity_provider_strategy = [
+    { capacity_provider = "FARGATE_SPOT", weight = 3, base = 0 },
+    { capacity_provider = "FARGATE",      weight = 1, base = 1 },
+  ]
+
+  container_definitions = [
+    {
+      name  = "worker"
+      image = "${var.ecr_registry}/worker:${var.worker_image_tag}"
+      secrets = [
+        { name = "DATABASE_URL", value_from = "/prod/worker/database-url" },
+        { name = "QUEUE_URL",    value_from = "/prod/worker/queue-url" },
+      ]
+      environment = {
+        LOG_LEVEL       = "info"
+        WORKER_CONCURRENCY = "4"
+      }
+    }
+  ]
+
+  task_role_inline_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility"]
+        Resource = ["arn:aws:sqs:us-east-1:*:jobs-*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = ["arn:aws:s3:::meu-bucket-processamento/*"]
+      }
+    ]
+  })
+
+  subnets         = var.private_subnets
+  security_groups = [aws_security_group.ecs_tasks.id]
+
+  # Sem ALB
+  target_group_arn = null
+
+  autoscaling_enabled      = true
+  autoscaling_min_capacity = 0
+  autoscaling_max_capacity = 10
+  autoscaling_cpu_target   = 80
+
+  desired_count = 1
+  tags          = local.common_tags
+}
+
+# ==============================================================================
+# Security Groups
+# ==============================================================================
+resource "aws_security_group" "alb" {
+  name        = "producao-alb"
+  description = "HTTP/HTTPS inbound"
+  vpc_id      = var.vpc_id
+
+  ingress { from_port = 80;  to_port = 80;  protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
+  ingress { from_port = 443; to_port = 443; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
+  egress  { from_port = 0;   to_port = 0;   protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
+
+  tags = local.common_tags
+}
+
+resource "aws_security_group" "ecs_tasks" {
+  name        = "producao-ecs-tasks"
+  description = "Tráfego do ALB para as tasks"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = 0
+    to_port         = 65535
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  egress { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+
+  tags = local.common_tags
+}
+
+# ==============================================================================
+# Variáveis
+# ==============================================================================
+variable "vpc_id"          { type = string }
+variable "public_subnets"  { type = list(string) }
+variable "private_subnets" { type = list(string) }
+variable "certificate_arn" { type = string }
+variable "extra_certificate_arns" { type = list(string); default = [] }
+variable "ecr_registry"    { type = string }
+variable "api_image_tag"     { type = string; default = "latest" }
+variable "frontend_image_tag" { type = string; default = "latest" }
+variable "worker_image_tag"   { type = string; default = "latest" }
+
+locals {
+  common_tags = {
+    Environment = "production"
+    Project     = "minha-app"
+    ManagedBy   = "terraform"
+  }
+}
+
+# ==============================================================================
+# Outputs
+# ==============================================================================
+output "cluster_arn"     { value = module.cluster.cluster_arn }
+output "alb_dns_name"    { value = module.alb.alb_dns_name }
+output "alb_zone_id"     { value = module.alb.alb_zone_id }
+
+output "services" {
+  value = {
+    api = {
+      task_definition  = module.service_api.task_definition_arn
+      execution_role   = module.service_api.execution_role_arn
+      task_role        = module.service_api.task_role_arn
+      log_groups       = module.service_api.log_group_names
+    }
+    frontend = {
+      task_definition = module.service_frontend.task_definition_arn
+      log_groups      = module.service_frontend.log_group_names
+    }
+    worker = {
+      task_definition = module.service_worker.task_definition_arn
+      task_role       = module.service_worker.task_role_arn
+      log_groups      = module.service_worker.log_group_names
+    }
+  }
+}

@@ -1,0 +1,251 @@
+################################################################################
+# Example: PostgreSQL - Production
+################################################################################
+module "rds_postgres_prod" {
+  source = "../../"
+
+  identifier = "my-app-postgres-prod"
+
+  # Engine
+  engine         = "postgres"
+  engine_version = "16.2"
+  instance_class = "db.t3.medium"
+
+  # Storage
+  allocated_storage     = 100
+  max_allocated_storage = 500 # Enable autoscaling up to 500 GB
+  storage_type          = "gp3"
+  storage_encrypted     = true
+
+  # Database
+  db_name  = "myapp"
+  username = "myapp_admin"
+  port     = 5432
+
+  # Network
+  vpc_id     = "vpc-0abc1234def567890"
+  subnet_ids = ["subnet-0aaa111", "subnet-0bbb222", "subnet-0ccc333"]
+
+  # Security Group
+  create_security_group      = true
+  allowed_cidr_blocks        = ["10.0.0.0/16"]
+  allowed_security_group_ids = ["sg-app-servers"]
+
+  # High Availability
+  multi_az = true
+
+  # Parameter Group
+  create_db_parameter_group = true
+  parameter_group_family    = "postgres16"
+  parameters = [
+    {
+      name  = "log_connections"
+      value = "1"
+    },
+    {
+      name  = "log_disconnections"
+      value = "1"
+    },
+    {
+      name         = "shared_preload_libraries"
+      value        = "pg_stat_statements"
+      apply_method = "pending-reboot"
+    }
+  ]
+
+  # Backup
+  backup_retention_period = 14
+  backup_window           = "02:00-03:00"
+  skip_final_snapshot     = false
+
+  # Maintenance
+  maintenance_window         = "Sun:03:00-Sun:04:00"
+  auto_minor_version_upgrade = true
+  apply_immediately          = false
+
+  # Monitoring
+  monitoring_interval             = 60
+  create_monitoring_role          = true
+  performance_insights_enabled    = true
+  enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+
+  cloudwatch_log_group_retention_in_days = 30
+
+  # Protection
+  deletion_protection = true
+
+  tags = {
+    Environment = "production"
+    Project     = "my-app"
+    ManagedBy   = "terraform"
+  }
+}
+
+################################################################################
+# Example: MySQL - Development (minimal config)
+################################################################################
+module "rds_mysql_dev" {
+  source = "../../"
+
+  identifier = "my-app-mysql-dev"
+
+  engine         = "mysql"
+  engine_version = "8.0.36"
+  instance_class = "db.t3.micro"
+
+  allocated_storage = 20
+  storage_encrypted = true
+
+  db_name  = "myapp"
+  username = "admin"
+  port     = 3306
+
+  vpc_id     = "vpc-0abc1234def567890"
+  subnet_ids = ["subnet-0aaa111", "subnet-0bbb222"]
+
+  allowed_cidr_blocks = ["10.0.0.0/16"]
+
+  # Dev settings
+  multi_az                = false
+  backup_retention_period = 3
+  skip_final_snapshot     = true
+  deletion_protection     = false
+  apply_immediately       = true
+
+  tags = {
+    Environment = "development"
+    Project     = "my-app"
+    ManagedBy   = "terraform"
+  }
+}
+
+################################################################################
+# Example: PostgreSQL with Read Replicas
+################################################################################
+module "rds_postgres_with_replicas" {
+  source = "../../"
+
+  identifier = "my-app-postgres-replicas"
+
+  engine         = "postgres"
+  engine_version = "16.2"
+  instance_class = "db.r6g.large"
+
+  allocated_storage     = 200
+  max_allocated_storage = 1000
+  storage_type          = "gp3"
+  storage_encrypted     = true
+
+  db_name  = "myapp"
+  username = "myapp_admin"
+
+  vpc_id     = "vpc-0abc1234def567890"
+  subnet_ids = ["subnet-0aaa111", "subnet-0bbb222", "subnet-0ccc333"]
+
+  allowed_cidr_blocks = ["10.0.0.0/16"]
+
+  multi_az = true
+
+  # Create 2 read replicas
+  replica_count          = 2
+  replica_instance_class = "db.r6g.medium"
+
+  backup_retention_period = 7
+  skip_final_snapshot     = false
+
+  monitoring_interval          = 60
+  performance_insights_enabled = true
+
+  deletion_protection = true
+
+  tags = {
+    Environment = "production"
+    Project     = "my-app"
+    ManagedBy   = "terraform"
+  }
+}
+
+
+#### Restore
+
+
+module "rds_sqlserver" {
+  source = "../../modules/rds"
+
+  identifier = "sql-web-hml3"
+
+  # Engine herdado do snapshot.
+  # Pode ser especificado para forçar upgrade de versão na restauração.
+  engine               = "sqlserver-ex"
+  engine_version       = "15.00.4236.7.v1"
+  major_engine_version = "15.00"
+  instance_class       = "db.t3.small"
+  license_model        = "license-included" # obrigatório para SQL Server
+
+  # ─── SNAPSHOT ──────────────────────────────────────────────────────────────
+  snapshot_identifier = "rds:sql-web-hml-2026-02-28-00-24"
+  # ────────────────────────────────────────────────────────────────────────────
+
+  # username, password e db_name são OMITIDOS — herdados do snapshot.
+  # manage_master_user_password também deve ser false para não gerar senha nova.
+  manage_master_user_password = false
+
+  # allocated_storage é OMITIDO — herdado do snapshot.
+  # max_allocated_storage pode ser definido para permitir autoscaling pós-restore.
+  max_allocated_storage = 200
+  storage_type          = "gp2"
+  storage_encrypted     = true
+
+  port = 1433 # SQL Server
+
+  # Network
+  vpc_id     = "vpc-0abc1234def567890"
+  subnet_ids = ["subnet-0aaa111", "subnet-0bbb222"]
+
+  create_security_group = true
+  allowed_cidr_blocks   = ["10.0.0.0/16"]
+
+  multi_az = false # não suportado no Express Edition
+
+  # Parameter Group — recriado para a instância restaurada
+  create_db_parameter_group = true
+  parameter_group_family    = "sqlserver-ex-15.0"
+  parameters = [
+    {
+      name         = "rds.force_ssl"
+      value        = "1"
+      apply_method = "pending-reboot"
+    }
+  ]
+
+  # Backup
+  backup_retention_period = 7
+  backup_window           = "02:00-03:00"
+  skip_final_snapshot     = false
+
+  # Maintenance
+  maintenance_window         = "Sun:03:00-Sun:04:00"
+  auto_minor_version_upgrade = true
+  apply_immediately          = true # recomendado após restore para aplicar parâmetros
+
+  # Monitoring
+  monitoring_interval                    = 60
+  create_monitoring_role                 = true
+  enabled_cloudwatch_logs_exports        = ["agent", "error"]
+  cloudwatch_log_group_retention_in_days = 14
+  performance_insights_enabled           = false # não disponível no Express
+
+  deletion_protection = false
+
+  tags = {
+    Environment  = "staging"
+    RestoredFrom = "rds:my-app-sqlserver-express-2024-01-15-03-00"
+    Engine       = "sqlserver-ex"
+    ManagedBy    = "terraform"
+  }
+}
+
+output "sqlserver_restored_endpoint" {
+  description = "Endpoint da instância SQL Server restaurada do snapshot"
+  value       = module.rds_sqlserver_from_snapshot.db_instance_endpoint
+}

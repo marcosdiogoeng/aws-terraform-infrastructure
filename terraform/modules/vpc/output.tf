@@ -1,49 +1,53 @@
+output "nat_gateway_ids" {
+  description = "IDs dos NAT Gateways. Map az→id no modo HA; map '0'→id no modo single; vazio se não criados."
+  value = var.create_nat_gateway ? (
+    var.nat_gateway_ha
+    ? { for az, ngw in aws_nat_gateway.ha : az => ngw.id }
+    : { "0" = aws_nat_gateway.single[0].id }
+  ) : {}
+}
+
+output "nat_eip_public_ips" {
+  description = "IPs públicos dos EIPs alocados para os NAT Gateways."
+  value = var.create_nat_gateway ? (
+    var.nat_gateway_ha
+    ? { for az, eip in aws_eip.nat_ha : az => eip.public_ip }
+    : { "0" = aws_eip.nat_single[0].public_ip }
+  ) : {}
+}
+
+
 output "vpc_id" {
-  description = "The ID of the VPC"
-  value       = aws_vpc.main_vpc.id
+  description = "ID da VPC criada."
+  value       = aws_vpc.this.id
 }
 
 output "vpc_cidr" {
-  description = "The CIDR block of the VPC"
-  value       = aws_vpc.main_vpc.cidr_block
+  description = "CIDR da VPC."
+  value       = aws_vpc.this.cidr_block
 }
 
-output "public_subnets" {
-  description = "List of public subnet IDs"
-  value       = [for subnet in aws_subnet.public_subnets : subnet.id]
+output "igw_id" {
+  description = "ID do Internet Gateway (null se create_igw = false)."
+  value       = var.create_igw ? aws_internet_gateway.this[0].id : null
 }
 
-output "private_subnets" {
-  description = "List of private subnet IDs"
-  value       = [for subnet in aws_subnet.private_subnets : subnet.id]
+output "public_subnet_ids" {
+  description = "Map de name → ID das subnets públicas."
+  value       = { for k, s in aws_subnet.public : k => s.id }
 }
 
-output "subnet_public_1a" {
-  description = "Public subnet in availability zone 1a"
-  value       = aws_subnet.public_subnets["public_subnet_1"].id
+output "private_subnet_ids" {
+  description = "Map de name → ID das subnets privadas."
+  value       = { for k, s in aws_subnet.private : k => s.id }
 }
 
-output "subnet_public_1b" {
-  description = "Public subnet in availability zone 1b"
-  value       = aws_subnet.public_subnets["public_subnet_2"].id
+output "public_route_table_id" {
+  description = "ID da route table pública (null se não houver subnets públicas)."
+  value       = length(var.public_subnets) > 0 ? aws_route_table.public[0].id : null
 }
 
-output "subnet_public_1c" {
-  description = "Public subnet in availability zone 1c"
-  value       = aws_subnet.public_subnets["public_subnet_3"].id
-}
-
-output "subnet_private_1a" {
-  description = "Private subnet in availability zone 1a"
-  value       = aws_subnet.private_subnets["private_subnet_1"].id
-}
-
-output "subnet_private_1b" {
-  description = "Private subnet in availability zone 1b"
-  value       = aws_subnet.private_subnets["private_subnet_2"].id
-}
-
-output "subnet_private_1c" {
-  description = "Private subnet in availability zone 1c"
-  value       = aws_subnet.private_subnets["private_subnet_3"].id
+output "private_route_table_ids" {
+  description = "Map de name → ID das route tables privadas."
+  value       = { for k, rt in aws_route_table.private : k => rt.id }
 }
