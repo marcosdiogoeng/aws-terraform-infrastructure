@@ -8,6 +8,12 @@ variable "source_dir" {
   type        = string
 }
 
+variable "description" {
+  description = "Description of the Lambda function"
+  type        = string
+  default     = ""
+}
+
 variable "handler" {
   description = "Lambda handler (filename.function_name)"
   type        = string

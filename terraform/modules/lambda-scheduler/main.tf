@@ -51,6 +51,7 @@ resource "aws_iam_role_policy" "custom" {
 
 resource "aws_lambda_function" "this" {
   function_name    = local.function_name
+  description      = var.description
   filename         = local.zip_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
   role             = aws_iam_role.this.arn
